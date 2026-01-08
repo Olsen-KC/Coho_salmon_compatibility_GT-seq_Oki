@@ -1,0 +1,899 @@
+---
+title: "Genetic compatibility shapes reproductive success in hatchery-origin coho salmon (Oncorhynchus kisutch): Open Data Resource"
+output:  
+  html_document: 
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+**Objective: Evaluate the reproductive success of genetically informed and random crosses of hatchery-origin coho salmon using genetic parentage analysis, generalized linear mixed models (GLMMs), and genotyping-in-thousands by sequencing (GT-seq)** 
+
+$$\\[0.15in]$$
+Load or install the following R packages used in analyses.
+```{r, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(kableExtra)
+library(DHARMa)
+library(glmmTMB)
+library(smplot2) 
+library(ggeffects) 
+library(splitstackshape)
+```
+
+Load quality filtered genotypes of parents crossed in 2019, 2020, and 2021, and offspring adult returns 2021 - 2024.
+```{r}
+load("filtered_GTseq_genotypes/Oki_filtered_genos.R")
+```
+
+In total, the genotype file contains 11,740 coho salmon genotyped at 120 GT-seq markers (columns 10 - 129). 
+```{r}
+dim(Oki_filtered_genos)
+```
+
+The first 9 columns of the genotype file contain identification information including the sample's plate name, abbreviated sample ID, sample type (i.e., female parent, genetically informed male parent, random male parent, juvenile offspring, or adult offspring), as well as sequencing information including the number of raw reads, percent of markers genotyped, and IFI score output from the GT-seq genotyping perl scripts. 
+```{r}
+kable(Oki_filtered_genos[1:4, 1:9])
+```
+
+Format genotype file for parentage analysis with the program COLONY. 
+```{r}
+genos_COLONY <- Oki_filtered_genos %>%
+  separate_wider_position(cols = one_of(colnames(Oki_filtered_genos)[10:ncol(Oki_filtered_genos)]), 
+                          names_sep = "_",
+                          widths = c("1" = 1, "2" = 1)) 
+
+##replace nucleotides with numeric values ## 
+##A = 1; T = 2; C = 3; G = 4; - = 5 ###
+genos_COLONY %<>%
+  mutate(across(colnames(genos_COLONY)[10:ncol(genos_COLONY)], 
+                ~ case_when(. == "A" ~ as.integer(1),
+                            . == "T" ~ as.integer(2),
+                            . == "C" ~ as.integer(3),
+                            . == "G" ~ as.integer(4), 
+                            . == "-" ~ as.integer(5),
+                            . == "0" ~ as.integer(0), 
+                )))
+```
+
+Subset 272 female parents. 
+```{r}
+##subset female parents
+maternal <- genos_COLONY %>%
+  filter(Sample_Type == "MC19_F" | Sample_Type == "MC20_F" | Sample_Type == "MC21_F")
+
+dim(maternal)
+```
+
+Subset 544 male parents. 
+```{r}
+##subset male parents
+paternal <- genos_COLONY %>%
+  filter(Sample_Type == "MC19_M" | Sample_Type == "MC19_R" | Sample_Type == "MC20_M" | Sample_Type == "MC20_R" | Sample_Type == "MC21_M" | Sample_Type == "MC21_R")
+
+dim(paternal)
+```
+
+Subset 10,924 potential offspring. 
+```{r}
+##subset offspring
+offspring <- genos_COLONY %>%
+  filter(Sample_Type == "MC21_J" | Sample_Type == "MC22_A" | Sample_Type == "MC22_J" | Sample_Type == "MC23_A" | Sample_Type == "MC23_J" | Sample_Type == "MC24_A")
+
+dim(offspring)
+```
+
+Generate exclusion files for offspring (e.g., Males crossed in 2021 cannot be fathers of returning coho in 2021 and should be excluded as potential fathers of these returns).  
+
+Paternity exclusion. 
+```{r}
+paternal_2019 <- paternal %>%
+  filter(Sample_Type == "MC19_M" | Sample_Type == "MC19_R")
+
+paternal_2019 %<>%
+  select(Sample_ID) %>%
+  t() %>%
+  as.data.frame() %>%
+  unite(together, 1:nrow(paternal_2019), sep = " ", remove = TRUE)
+
+paternal_2020 <- paternal %>%
+  filter(Sample_Type == "MC20_M" | Sample_Type == "MC20_R")
+
+paternal_2020 %<>%
+  select(Sample_ID) %>%
+  t() %>%
+  as.data.frame() %>%
+  unite(together, 1:nrow(paternal_2020), sep = " ", remove = TRUE)
+
+paternal_2021 <- paternal %>%
+  filter(Sample_Type == "MC21_M" | Sample_Type == "MC21_R")
+
+paternal_2021 %<>%
+  select(Sample_ID) %>%
+  t() %>%
+  as.data.frame() %>%
+  unite(together, 1:nrow(paternal_2021), sep = " ", remove = TRUE)
+```
+
+
+7,637 returns have some age-based paternal/maternal exclusion.
+```{r}
+offspring_paternal_exclusion <- genos_COLONY %>%
+  filter(Sample_Type == "MC21_J" | Sample_Type == "MC22_A" | Sample_Type == "MC22_J" | Sample_Type == "MC24_A") %>%
+  select(Sample_ID, Sample_Type) %>%
+  mutate(exluded_paternity = case_when(Sample_Type == "MC21_J" ~ paste(paternal_2020$together, paternal_2021$together), 
+                                       Sample_Type == "MC22_J" | Sample_Type == "MC22_A" ~ paste(paternal_2021$together), 
+                                       Sample_Type == "MC24_A" ~ paste(paternal_2019$together))) %>%
+  select(-one_of("Sample_Type"))
+```
+
+Write text file for paternity exclusion.
+```{r}
+write.table(offspring_paternal_exclusion, quote = FALSE, row.names = FALSE, col.names = FALSE, sep = " ", file = "COLONY_results/paternal_exclusion_colony_120_May_2025.txt")
+```
+
+Maternity Exclusion.
+```{r}
+maternal_2019 <- maternal %>%
+  filter(Sample_Type == "MC19_F")
+
+maternal_2019 %<>%
+  select(Sample_ID) %>%
+  t() %>%
+  as.data.frame() %>%
+  unite(together, 1:nrow(maternal_2019), sep = " ", remove = TRUE)
+
+maternal_2020 <- maternal %>%
+  filter(Sample_Type == "MC20_F")
+
+maternal_2020 %<>%
+  select(Sample_ID) %>%
+  t() %>%
+  as.data.frame() %>%
+  unite(together, 1:nrow(maternal_2020), sep = " ", remove = TRUE)
+
+maternal_2021 <- maternal %>%
+  filter(Sample_Type == "MC21_F")
+
+maternal_2021 %<>%
+  select(Sample_ID) %>%
+  t() %>%
+  as.data.frame() %>%
+  unite(together, 1:nrow(maternal_2021), sep = " ", remove = TRUE)
+```
+
+```{r}
+offspring_maternal_exclusion <- genos_COLONY %>%
+  filter(Sample_Type == "MC21_J" | Sample_Type == "MC22_A" | Sample_Type == "MC22_J" | Sample_Type == "MC24_A") %>%
+  select(Sample_ID, Sample_Type) %>%
+  mutate(exluded_maternity = case_when(Sample_Type == "MC21_J" ~ paste(maternal_2020$together, maternal_2021$together), 
+                                       Sample_Type == "MC22_J" | Sample_Type == "MC22_A" ~ paste(maternal_2021$together), 
+                                       Sample_Type == "MC24_A" ~ paste(maternal_2019$together))) %>%
+  select(-one_of("Sample_Type"))
+```
+
+Write text file for maternity exclusion.
+```{r}
+write.table(offspring_maternal_exclusion, quote = FALSE, row.names = FALSE, col.names = FALSE, sep = " ", file = "COLONY_results/maternal_exclusion_colony_120_May_2025.txt")
+```
+
+Drop columns with GT_seq sequencing information.
+```{r}
+maternal %<>%
+  select(! c(Sample, Sample_Type, HMSCNumber, Raw.Reads, On.Target.Reads, Perc_On_Target, Perc_GT, IFI))
+
+paternal %<>%
+  select(! c(Sample, Sample_Type, HMSCNumber, Raw.Reads, On.Target.Reads, Perc_On_Target, Perc_GT, IFI))
+
+offspring %<>%
+  select(! c(Sample, Sample_Type, HMSCNumber, Raw.Reads, On.Target.Reads, Perc_On_Target, Perc_GT, IFI))
+```
+
+Format marker names for COLONY and write marker information as a text file. 
+```{r}
+##the last 4 marker names are more than 20 characters which colony doesn't allow. Shorten these marker names to  20 characters
+markerList <- colnames(Oki_filtered_genos)[10:ncol(Oki_filtered_genos)]
+
+markerList[113] <- "NW_018086965.1_71096"
+markerList[115] <- "NW_018090044.1_22809"
+markerList[116] <- "NW_018090214.1_34923"
+markerList[118] <- "NW_018090923.1_12075"
+markerList[119] <- "NW_018091274.1_19363"
+markerList[120] <- "NW_018091316.1_28973"
+
+markerList <- as.data.frame(t(markerList))
+
+param1<-0
+param2<-0.001
+markerList<-rbind(markerList,param1,param1,param2)
+
+write.table(markerList,"COLONY_results/MarkerForColony_120_May_2025.txt", quote=FALSE, sep="\t", col.names=FALSE, row.names=FALSE)
+```
+
+Write parental and offspring genotype files as text files for input to COLONY. 
+```{r}
+write.table(maternal, "COLONY_results/272_F_120loci_COLONY.txt", quote=FALSE, row.names=FALSE, col.names=FALSE, sep="\t")
+write.table(paternal, "COLONY_results/544_M_120loci_COLONY.txt", quote=FALSE, row.names=FALSE, col.names=FALSE, sep="\t")
+write.table(offspring, "COLONY_results/10924_O_120loci_COLONY.txt", quote=FALSE, row.names=FALSE, col.names=FALSE, sep="\t")
+```
+
+
+Read in the results of the genetic parentage analysis from COLONY.  
+This run used the quality filtered 120 marker set with combined FPLS method and medium run length.
+```{r}
+parent_pair<-read.csv("COLONY_results/Oki_COLONY_results.csv", header = TRUE)
+```
+
+The parent pair result file output from COLONY contains the parentage assignments of each offspring in rows, the inferred paternal parent (dad), the inferred maternal parent (mum), and the probability of the assignment given the multi-locus genotypes of the offspring and parent pair.   
+Note, that assignments without a dad are indicated with * and assignments without a mum are indicated with #. Also, note that some offspring can have multiple associated assignments (i.e., multiple rows) when different parent pairs can not be excluded.  
+```{r}
+kable(head(parent_pair))
+```
+
+Because some offspring have multiple assignments with varying probabilities, consolidate and keep the assignment for each offspring with the highest probability.  
+```{r}
+parent_pair %<>%
+  group_by(OffspringID) %>%
+  filter(`Probability` == max(`Probability`))
+```
+
+Only evaluate assignments with probability greater than 90%.
+```{r}
+parent_pair %<>%
+  mutate(InferredDad = case_when(Probability < 0.9 ~ '*', 
+                                 TRUE ~ InferredDad)) %>%
+  mutate(InferredMum = case_when(Probability < 0.9 ~ '#', 
+                                 TRUE ~ InferredMum))
+```
+
+Join metadata from genotype file to the samples in the parentage file.
+```{r}
+parent_pair %<>%
+  left_join(select(Oki_filtered_genos, Sample_ID, Sample_Type), by = c("OffspringID"="Sample_ID")) %>%
+  dplyr::rename(Sample_Type_offspring=Sample_Type) %>%
+  left_join(select(Oki_filtered_genos, Sample_ID, Sample_Type), by = c("InferredDad"="Sample_ID")) %>%
+  dplyr::rename(Sample_Type_inferredDad=Sample_Type) %>%
+  left_join(select(Oki_filtered_genos, Sample_ID, Sample_Type), by = c("InferredMum"="Sample_ID")) %>%
+  dplyr::rename(Sample_Type_inferredMum=Sample_Type) 
+
+kable(head(parent_pair))
+```
+
+Generate a bar plot of all parentage assignments.
+Generate counts for each assignment type (i.e., unassigned, only dad, only mum, and both parents assigned).
+```{r}
+returns <- parent_pair %>%
+  mutate(return_year = case_when(Sample_Type_offspring == "MC21_J" ~ '2021', 
+                                 Sample_Type_offspring == "MC22_A" ~ '2022', 
+                                 Sample_Type_offspring == "MC22_J" ~ '2022', 
+                                 Sample_Type_offspring == "MC23_A" ~ '2023', 
+                                 Sample_Type_offspring == "MC23_J" ~ '2023', 
+                                 Sample_Type_offspring == "MC24_A" ~ '2024')) %>%
+  mutate(unassigned = case_when(InferredDad == "*" & InferredMum == "#" ~ 1,
+                                TRUE ~ 0)) %>%
+  mutate(father_only = case_when(str_detect(InferredDad, "MC") & InferredMum == "#" ~ 1,
+                                     TRUE ~ 0)) %>%
+  mutate(mother_only = case_when(str_detect(InferredMum, "MC") & InferredDad == "*" ~ 1, 
+                                     TRUE ~ 0)) %>%
+  mutate(father_mother = case_when(str_detect(InferredDad, "MC") & str_detect(InferredMum, "MC") ~ 1, 
+                                            TRUE ~ 0))
+``` 
+
+Sum counts for each type of return in each year. 
+```{r}
+returns_summary <- returns %>%
+  group_by(return_year) %>%
+  summarise(unassigned_counts = sum(unassigned), 
+            father_or_mother_counts = sum(father_only, mother_only), 
+            father_mother_counts = sum(father_mother), 
+            Total = sum(unassigned, father_only, mother_only, father_mother))
+            
+returns_summary %<>%
+  pivot_longer(cols = c(unassigned_counts, father_or_mother_counts, father_mother_counts, Total), 
+               names_to = "Assignment", 
+               values_to = "counts")
+
+returns_summary$Assignment <- factor(returns_summary$Assignment, levels = c("unassigned_counts", "father_or_mother_counts", "father_mother_counts", "Total"))
+```
+
+Generate a bar plot of returns for each year. Figure 1b in manuscript. 
+```{r}
+returns_plot<-ggplot(returns_summary, aes(x = return_year, y = counts, fill = Assignment)) + 
+  geom_bar(position = "dodge", stat = "identity", color = "black") +
+  scale_fill_manual("", labels = c("Unassigned", "Father or Mother", "Father & Mother", "Total Genotyped"),  values = c('white', 'gray85', 'grey45', 'black')) +  
+  scale_y_continuous(limits = c(0, 4000), expand = expansion(mult = c(0, 0))) +
+  ylab("Number of Returns") + 
+  xlab("Return Year") + 
+  theme_classic() + 
+  theme(text = element_text(family = "sans"),
+    legend.key.size = unit(1.5, "line"),
+    legend.text = element_text(size = 16),
+    axis.ticks = element_line(linewidth = 1.5, color = "black"),
+    axis.ticks.length = unit(0.25, "cm"),
+    axis.text = element_text(color = "black", size = 14.0),
+    axis.title.y = element_text(color = "black", size = 20, margin = margin(t = 0, r = 10, b = 0, l = 0)),
+    axis.title.x = element_text(color = "black", size = 20, margin = margin(t = 10, r = 0, b = 0, l = 0)),
+    axis.line = element_line(linewidth = 1.5, color = "black")) 
+
+
+returns_plot
+```
+
+
+$$\\[0.15in]$$
+
+Subsequent analyses focused on offspring assignments with both parents assigned and corresponded to parent pairs that were crossed in 2019, 2020, and 2021. 
+
+Load the identifiers for which parents were crossed in each year. 
+```{r}
+load("parent_pairs/Oki_crossed_parent_IDs.R")
+```
+
+This dataset contains the sample information for which females were crossed with which genetically informed male and which random male. 
+```{r}
+kable(head(crossed_parents))
+```
+
+Split-brood crosses were conducted in 2019 (n = 111), 2020 (n = 58), and 2021 (n = 103). 
+```{r}
+kable(table(crossed_parents$Cross_Year), col.names = c("Year", "n"))
+```
+
+Subset those assignments with both parents assigned. 
+```{r}
+##Look at just those offspring with both parents assigned 
+pp_both <- parent_pair[- which(parent_pair$InferredDad == "*" | parent_pair$InferredMum == "#"), ] %>%
+  mutate(InferredMum_InferredDad = paste(InferredMum, InferredDad, sep = "_"))
+```
+
+Remove assignments that do not correspond to parent pairs in the crosses conducted. 
+```{r}
+##Remove assignment that don't match those conducted 
+pp_both_match <- pp_both %>%
+  filter(InferredMum_InferredDad %in% crossed_parents$Female_MC_Male | InferredMum_InferredDad %in% crossed_parents$Female_Random_Male)
+```
+
+Estimate age of return for offspring based on year returned and parent crossing year. 
+```{r}
+return_timing <- pp_both_match %>%
+  mutate(paternal_year = case_when(str_detect(Sample_Type_inferredDad, "19") ~ 2019, 
+                                   str_detect(Sample_Type_inferredDad, "20") ~ 2020, 
+                                   str_detect(Sample_Type_inferredDad, "21") ~ 2021)) %>%
+  mutate(return_year = case_when(str_detect(Sample_Type_offspring, "21") ~ 2021, 
+                                 str_detect(Sample_Type_offspring, "22") ~ 2022, 
+                                 str_detect(Sample_Type_offspring, "23") ~ 2023, 
+                                 str_detect(Sample_Type_offspring, "24") ~ 2024)) %>%
+  mutate(offspring_age = return_year - paternal_year)
+
+timing_summary<- return_timing %>%
+  group_by(return_year, offspring_age) %>%
+  summarise(n = n())
+
+zero_data<-data.frame(
+  return_year = c(2021, 2024), 
+  offspring_age = c(3, 2), 
+  n = c(0, 0)) 
+
+timing_summary %<>%
+  rbind(zero_data) %>%
+  mutate(offspring_age = case_when(offspring_age == 2 ~ 'Age 2', 
+                                   offspring_age == 3 ~ 'Age 3', 
+  ))
+
+timing_summary$return_year<-as.character(timing_summary$return_year)
+timing_summary$offspring_age<-as.character(timing_summary$offspring_age) 
+timing_summary$return_year<-factor(timing_summary$return_year, levels = c("2021", "2022", "2023", "2024")) 
+timing_summary$offspring_age<-factor(timing_summary$offspring_age, levels = c("Age 2", "Age 3"))
+timing_summary<-timing_summary[order(timing_summary$return_year, timing_summary$offspring_age), ]
+```
+
+Based on the genetic parentage analysis, 1,929 (22%) coho returned at age 2 and 6,782 (78%) returned at age 3. No age 4 returns were detected.
+```{r}
+kable(timing_summary, col.names = c("Return Year", "Age", "n"))
+```
+
+Load the MFC compatibility scores generated by the program MultifacetedCHOICE. 
+```{r}
+load("parent_pairs/Oki_MFC_scores.R")
+```
+
+This dataset contains the MFC compatbility score (rank_score) for genetically informed and random crosses conducted in 2019, 2020, and 2021. 
+```{r}
+kable(MFC_scores[1:4, 1:3], col.names = c("Female", "Male", "MFC score"))
+```
+
+Generate a barplot of MFC scores for both cross types in 2019, 2020, and 2021 (Figure 2A).
+```{r}
+MFC_scores_plot<-ggplot(MFC_scores, aes(x = `Cross Year`, y = rank_score, fill = cross_type)) +
+  geom_boxplot(outlier.shape = NA, lwd = 1.0) + 
+  geom_point(position = position_jitterdodge(jitter.width = 0.1), color = "black", size = 2.0, alpha = 0.2) +
+  scale_fill_manual("", labels = c("\u2640 x Informed \u2642", "\u2640 x Random \u2642"), values = c('white', 'lightgrey')) + 
+  theme_classic() + 
+  ylab("MFC Compatibility Score") + 
+  xlab("Year Crossed") +
+  scale_y_continuous(limits = c(45, 70), expand = expansion(mult = c(0.01, 0))) +
+  theme(text = element_text(family = "sans"),
+    legend.key.size = unit(3, "line"),
+    legend.text = element_text(size = 22),
+    axis.ticks = element_line(linewidth = 1.5, color = "black"),
+    axis.ticks.length = unit(0.25, "cm"),
+    axis.text = element_text(color = "black", size = 14.0),
+    axis.title.y = element_text(color = "black", size = 24, margin = margin(t = 0, r = 10, b = 0, l = 0)),
+    axis.title.x = element_text(color = "black", size = 24, margin = margin(t = 10, r = 0, b = 0, l = 0)),
+    axis.line = element_line(linewidth = 1.5, color = "black")) 
+
+MFC_scores_plot
+```
+
+**Evaluate MFC scores and the underlying assortative and disassortive gene combinations in parents crossed in 2019, 2020, and 2021**
+
+Genetically informed crosses were made prior to quality filtering using the full 154 marker panel.   
+
+Load the initial 154 marker genotypes (unfiltered) of the parents that passed quality filtering. 
+```{r}
+load("parent_pairs/Oki_parents_154_marker_genotypes.R") 
+```
+
+Add a unique numeric identifier to each cross in the MFC dataset. We will use this cross ID to keep track of parent pairs while evaluating their combined multi-locus genotypes and MFC scores.  
+```{r}
+MFC_scores %<>%
+  rowid_to_column("cross_ID")
+```
+
+Join the numeric identifier to the genotype dataset. 
+```{r}
+parents_genos %<>%
+  left_join(select(MFC_scores, female, cross_ID,), by = c("Sample"="female")) %>%
+  rename("cross_ID_female"="cross_ID") %>%
+  left_join(select(MFC_scores, male, cross_ID), by = c("Sample"="male")) %>%
+  rename("cross_ID_male"="cross_ID") %>%
+  mutate(cross_ID = case_when(is.na(cross_ID_female) == TRUE ~ cross_ID_male, 
+                              TRUE ~ cross_ID_female)) %>%
+  select(-one_of(c("cross_ID_male", "cross_ID_female")))
+```
+
+Subset the genotypes of each crossing pair.
+```{r}
+pair_genos <- split(parents_genos, parents_genos[["cross_ID"]])
+```
+
+For example, the genotypes of the female and genetically informed male in the 'first' cross at the first 8 markers. 
+```{r}
+kable(pair_genos$`1`[, 1:10])
+```
+
+For each crossing pair add delimiter to the genotype of each marker. This way we can separate each allele and count how many are matching or mismatching for in each parent pair. 
+```{r, warning=FALSE}
+##identify the marker names from the corresponding column names##
+markers<-colnames(parents_genos)[3:156] 
+
+delim_gtypes <- lapply(pair_genos, function(x){data.frame(x) %>%
+    mutate(across(markers,
+                ~ case_when(. == "AA" ~ "A/A",
+                            . == "AT" ~ "A/T", 
+                            . == "AC" ~ "A/C",
+                            . == "AG" ~ "A/G",
+                            . == "TT" ~ "T/T",
+                            . == "TA" ~ "T/A",
+                            . == "TC" ~ "T/C",
+                            . == "TG" ~ "T/G",
+                            . == "CC" ~ "C/C",
+                            . == "CA" ~ "C/A", 
+                            . == "CT" ~ "C/T", 
+                            . == "CG" ~ "C/G",
+                            . == "GG" ~ "G/G", 
+                            . == "GA" ~ "G/A",
+                            . == "GT" ~ "G/T",
+                            . == "GC" ~ "G/C", 
+                            . == "--" ~ "-/-", 
+                            . == "A-" ~ "A/-", 
+                            . == "T-" ~ "T/-", 
+                            . == "C-" ~ "C/-", 
+                            . == "G-" ~ "G/-", 
+                            . == "-A" ~ "-/A",
+                            . == "-T" ~ "-/T", 
+                            . == "-C" ~ "-/C", 
+                            . == "-G" ~ "-/G", 
+                            . == "00" ~ "0/0", 
+                            . == "0" ~ "0/0"
+                )))})
+
+```
+
+MFC scores are a composite estimates of two marker types: **assortative** in which matching genotypes are favored and **disassortative** in which mismatching genotypes are favored. 
+
+Load the metadata designating which markers are assortative and which are disassortative.
+```{r}
+allele_info <- read.csv("parent_pairs/Table S1_Oki_Sandy_154marker.csv")
+```
+
+Subset positively assorting markers.
+```{r}
+markers_pos <- allele_info$site_id[allele_info$advantage == "assortative"]
+
+delim_gtypes_pos <- lapply(delim_gtypes, function(x){data.frame(x) %>%
+    select(all_of(markers_pos))})
+```
+
+Subset disassortive markers.
+```{r}
+markers_neg <- allele_info$site_id[allele_info$advantage == "disassortative"]
+
+delim_gtypes_neg <- lapply(delim_gtypes, function(x){data.frame(x) %>%
+    select(all_of(markers_neg))})
+```
+
+For each cross pair split each marker into two columns
+```{r}
+##split genotypes into 2 alleles
+dfspltgeno_pos <- lapply(delim_gtypes_pos, function(x){data.frame(x) %>% 
+    cSplit(splitCols = markers_pos, sep = "/", type.convert = FALSE)}) 
+
+dfspltgeno_neg <- lapply(delim_gtypes_neg, function(x){data.frame(x) %>% 
+    cSplit(splitCols = markers_neg, sep = "/", type.convert = FALSE)}) 
+```
+
+For each cross pair determine (TRUE/FALSE) if each allele is the same or different
+```{r}
+allele_state_pos <- lapply(dfspltgeno_pos, function(x){data.frame(x) %>%
+    apply(MARGIN = 2, function(x) any(duplicated(x)))})
+
+allele_state_neg <- lapply(dfspltgeno_neg, function(x){data.frame(x) %>%
+    apply(MARGIN = 2, function(x) any(duplicated(x)))})
+```
+
+Recombine into one dataset for assortative markers and another for disassortative markers. 
+```{r}
+states_combined_pos <- purrr::map_df(allele_state_pos, as.data.frame, .id = 'cross_ID')
+
+states_combined_neg <- purrr::map_df(allele_state_neg, as.data.frame, .id = 'cross_ID')
+```
+
+Count the number of matching and mismatching alleles and the proportion for both marker types. 
+```{r}
+states_sum_pos <- states_combined_pos %>%
+  rename(same_allele='.x[[i]]') %>%
+  group_by(cross_ID) %>%
+  summarise(allele_in_common_pos = sum(same_allele == TRUE)) 
+
+states_sum_pos$prop_in_common_pos <- states_sum_pos$allele_in_common_pos / 210
+
+
+states_sum_neg <- states_combined_neg %>%
+  rename(same_allele='.x[[i]]') %>%
+  group_by(cross_ID) %>%
+  summarise(allele_not_common_neg = sum(same_allele == FALSE)) 
+
+states_sum_neg$prop_not_common_neg <- states_sum_neg$allele_not_common_neg / 98
+```
+
+Calculate genotype missingness for assortative and disassortative markers. 
+```{r}
+missing_pos <- lapply(dfspltgeno_pos, function(x){data.frame(x) %>%
+    apply(MARGIN = 1, function(x) sum(x == "0"))})
+
+missing_neg <- lapply(dfspltgeno_neg, function(x){data.frame(x) %>%
+    apply(MARGIN = 1, function(x) sum(x == "0"))})
+```
+
+Combine missingness data for both marker types. 
+```{r}
+missing_combined_pos <- purrr::map_df(missing_pos, as.data.frame, .id = 'cross_ID')
+
+missing_combined_neg <- purrr::map_df(missing_neg, as.data.frame, .id = 'cross_ID')
+```
+
+Count the number of missing alleles. 
+```{r}
+missing_sum_pos <- missing_combined_pos %>%
+  rename(alleles_missing ='.x[[i]]') %>%
+  group_by(cross_ID) %>%
+  summarise(allele_missing_common_pos = sum(alleles_missing)) 
+
+missing_sum_neg <- missing_combined_neg %>%
+  rename(alleles_missing ='.x[[i]]') %>%
+  group_by(cross_ID) %>%
+  summarise(allele_missing_common_neg = sum(alleles_missing)) 
+
+missing_sum <- missing_sum_pos %>%
+  left_join(missing_sum_neg) 
+
+missing_sum$total_alleles_missing <- missing_sum$allele_missing_common_pos + missing_sum$allele_missing_common_neg 
+missing_sum$prop_alleles_missing <- missing_sum$total_alleles_missing / 616 
+missing_sum$call_rate <- 1 - missing_sum$prop_alleles_missing
+```
+
+Join genotype characteristics to MFC dataset. 
+```{r}
+MFC_scores$cross_ID <- as.character(MFC_scores$cross_ID)
+
+
+MFC_pair_info <- MFC_scores %>%
+  left_join(select(states_sum_pos, allele_in_common_pos, prop_in_common_pos, cross_ID), by = "cross_ID") %>%
+  left_join(select(states_sum_neg, allele_not_common_neg, prop_not_common_neg, cross_ID), by = "cross_ID") %>%
+  left_join(select(missing_sum, call_rate, cross_ID), by = "cross_ID")
+```
+
+Generate scatter plot indicating association between MFC score and proportion of alleles matching at assortative markers. Figure S1A.
+```{r}
+MFC_pos_plot <- ggplot(MFC_pair_info, aes(x = prop_in_common_pos, y = rank_score)) + 
+  geom_point(color = "black", alpha = 0.2, size = 3) + 
+  geom_smooth(method = "lm", linetype = "dashed", color = "black", linewidth = 2, se = FALSE) +
+  ylab("MFC Compatibility Score") + 
+  xlab("Proportion of alleles matching \n (assortative markers)") +
+  scale_y_continuous(limits = c(47, 68), breaks = c(seq(47, 68, by = 3)), expand = expansion(mult = c(0.02, 0))) +
+  scale_x_continuous(limits = c(0.58, 0.90), breaks = c(seq(0.58, 0.90, by = 0.04)), expand = expansion(mult = c(0.02, 0.02))) +
+  theme_classic() +
+  theme(text = element_text(family = "sans"),
+    axis.ticks = element_line(linewidth = 1.5, color = "black"),
+    axis.ticks.length = unit(0.25, "cm"),
+    axis.text = element_text(color = "black", size = 14.0),
+    axis.title.y = element_text(color = "black", size = 20, margin = margin(t = 0, r = 10, b = 0, l = 0)),
+    axis.title.x = element_text(color = "black", size = 20, margin = margin(t = 10, r = 0, b = 0, l = 0)),
+    axis.line = element_line(linewidth = 1.5, color = "black")) 
+
+
+MFC_pos_plot
+```
+
+Generate scatter plot indicating association between MFC score and proportion of alleles mismatching at disassortative markers. Figure S1B. 
+```{r}
+MFC_neg_plot <- ggplot(MFC_pair_info, aes(x = prop_not_common_neg, y = rank_score)) + 
+  geom_point(color = "black", alpha = 0.2, size = 3) + 
+  geom_smooth(method = "lm", linetype = "dashed", color = "black", linewidth = 2, se = FALSE) +
+  ylab("MFC Compatibility Score") + 
+  xlab("Proportion of alleles mismatching \n (disassortative markers)") +
+  scale_y_continuous(limits = c(47, 68), breaks = c(seq(47, 68, by = 3)), expand = expansion(mult = c(0.02, 0))) +
+  scale_x_continuous(limits = c(0.14, 0.58), breaks = c(seq(0.14, 0.58, by = 0.04)), expand = expansion(mult = c(0.02, 0.02))) +
+  theme_classic() +
+  theme(text = element_text(family = "sans"),
+    axis.ticks = element_line(linewidth = 1.5, color = "black"),
+    axis.ticks.length = unit(0.25, "cm"),
+    axis.text = element_text(color = "black", size = 14.0),
+    axis.title.y = element_text(color = "black", size = 20, margin = margin(t = 0, r = 10, b = 0, l = 0)),
+    axis.title.x = element_text(color = "black", size = 20, margin = margin(t = 10, r = 0, b = 0, l = 0)),
+    axis.line = element_line(linewidth = 1.5, color = "black")) 
+
+
+MFC_neg_plot
+```
+
+Generate scatter plot indicating association between MFC score and proportion of markers genotyped. Figure S1C. 
+```{r}
+MFC_missing_plot <- ggplot(MFC_pair_info, aes(x = call_rate, y = rank_score)) + 
+  geom_point(color = "black", alpha = 0.2, size = 3) + 
+  geom_smooth(method = "lm", linetype = "dashed", color = "black", linewidth = 2, se = FALSE) +
+  ylab("MFC Compatibility Score") + 
+  xlab("Proportion genotyped") +
+  scale_y_continuous(limits = c(47, 68), breaks = c(seq(47, 68, by = 3)), expand = expansion(mult = c(0.02, 0))) +
+  scale_x_continuous(limits = c(0.68, 1), breaks = c(seq(0.68, 1, by = 0.04)), expand = expansion(mult = c(0.02, 0.02))) +
+  theme_classic() +
+  theme(text = element_text(family = "sans"),
+    axis.ticks = element_line(linewidth = 1.5, color = "black"),
+    axis.ticks.length = unit(0.25, "cm"),
+    axis.text = element_text(color = "black", size = 14.0),
+    axis.title.y = element_text(color = "black", size = 20, margin = margin(t = 0, r = 10, b = 0, l = 0)),
+    axis.title.x = element_text(color = "black", size = 20, margin = margin(t = 10, r = 0, b = 0, l = 0)),
+    axis.line = element_line(linewidth = 1.5, color = "black")) 
+
+
+MFC_missing_plot
+```
+
+$$\\[0.15in]$$
+
+**Evaluate the reproductive success of genetically informed and random crosses.** 
+
+Count the number of assignments for each inferred dad. Note, that any males that were crossed but were not assigned any offspring won't be in this dataset. 
+```{r}
+paternal_fitness <- pp_both_match %>%
+ group_by(InferredDad) %>%
+  summarise(TLF = sum(n()))
+```
+
+Generate a dataset with all crossed genetically informed and random males including those without any assigned offspring.
+```{r}
+all_males <- as.data.frame(c(crossed_parents$MC_ID, crossed_parents$RM_ID)) 
+
+all_males %<>%
+  dplyr::rename("Male" = "c(crossed_parents$MC_ID, crossed_parents$RM_ID)") 
+
+all_males %<>%
+  left_join(select(Oki_filtered_genos, Sample_ID, Sample_Type), by = c("Male" = "Sample_ID")) %>%
+  left_join(select(paternal_fitness, InferredDad, TLF), by = c("Male" = "InferredDad"))
+```
+
+Currently, any males without any assigned offspring have 'NA' for fitness. Replace NA with 0. 
+```{r}
+##replace NA with 0 for TLF 
+all_males %<>%
+  mutate(TLF = case_when(is.na(TLF) == TRUE ~ 0, 
+                         TRUE ~ TLF)) %>%
+  mutate(cross_type = case_when(str_detect(Sample_Type, "_R") ~ "Random_Male", 
+                                TRUE ~ "Mate_Choice_Male"))
+```
+
+Calculate mean and standard deviation in fitness for each cross type.
+```{r}
+fitness_means <- all_males %>%
+  group_by(Sample_Type) %>%
+  summarise(mean = mean(TLF), St.dev = sd(TLF))
+```
+
+Make boxplot of male fitness across years. Figure 2B.
+```{r}
+all_males %<>%
+  mutate(`Cross Year`= case_when(str_detect(Sample_Type, "19") ~ '2019', 
+                                 str_detect(Sample_Type, "20") ~ '2020', 
+                                 str_detect(Sample_Type, "21") ~ '2021')) 
+
+male_fitness_plot<-ggplot(all_males, aes(x = `Cross Year`, y = TLF, fill = cross_type)) +
+  geom_boxplot(outlier.shape = NA, linewidth = 1) + 
+  geom_point(position = position_jitterdodge(jitter.width = 0.1), color = "black", size = 2.0, alpha = 0.2) +
+  scale_fill_manual("", labels = c("\u2640 x Informed \u2642", "\u2640 x Random \u2642"),  values = c('white', 'lightgrey')) +
+  scale_y_continuous(limits = c(0, 85), breaks = c(seq(0, 80, by = 20)), expand = expansion(mult = c(0.025, 0))) +
+  ylab("Assigned Offspring") + 
+  xlab("Year Crossed") +
+  theme_classic() + 
+  theme(text = element_text(family = "sans"),
+    legend.key.size = unit(3, "line"),
+    legend.text = element_text(size = 22),
+    axis.ticks = element_line(linewidth = 1.5, color = "black"),
+    axis.ticks.length = unit(0.25, "cm"),
+    axis.text = element_text(color = "black", size = 14.0),
+    axis.title.y = element_text(color = "black", size = 24, margin = margin(t = 0, r = 10, b = 0, l = 0)),
+    axis.title.x = element_text(color = "black", size = 24, margin = margin(t = 10, r = 0, b = 0, l = 0)),
+    axis.line = element_line(linewidth = 1.5, color = "black")) 
+
+
+
+male_fitness_plot
+```
+
+Evaluate correlation across females in reproductive success and MFC scores in genetically informed and random crosses.
+
+Add fitness data to MFC dataset.
+```{r}
+MFC_scores %<>%
+  left_join(select(all_males, Male, TLF), by = c("Male_ID"="Male"))
+```
+
+Make a dataset with fitness for each female.
+```{r}
+female_fitness <- MFC_scores %>%
+  select(Female_ID, cross_type, TLF, rank_score, `Cross Year`) %>%
+  pivot_wider(names_from = cross_type, values_from = c(TLF, rank_score))
+```
+
+Generate a scatter plot for female reproductive success. Figure S2B.
+```{r}
+female_fitness_plot <- ggplot(female_fitness, aes(x = TLF_R, y = TLF_M)) + 
+  geom_point(color = "black", alpha = 0.2, size = 3) + 
+  sm_statCorr(corr_method = "spearman", linetype = "dashed", color = "black", show_text = FALSE, size=2) +
+  ylab("  \u2640 x Informed \u2642\n Assigned Offspring") + 
+  xlab("\u2640 x Random \u2642\n Assigned Offspring") +
+  scale_y_continuous(limits = c(0, 80), breaks = c(seq(0, 80, by = 20)), expand = expansion(mult = c(0.02, 0))) +
+  scale_x_continuous(limits = c(0, 90), breaks = c(seq(0, 80, by = 20)), expand = expansion(mult = c(0.02, 0.05))) +
+  theme_classic() +
+  theme(text = element_text(family = "sans"),
+    axis.ticks = element_line(linewidth = 1.5, color = "black"),
+    axis.ticks.length = unit(0.25, "cm"),
+    axis.text = element_text(color = "black", size = 14.0),
+    axis.title.y = element_text(color = "black", size = 20, margin = margin(t = 0, r = 10, b = 0, l = 0)),
+    axis.title.x = element_text(color = "black", size = 20, margin = margin(t = 10, r = 0, b = 0, l = 0)),
+    axis.line = element_line(linewidth = 1.5, color = "black")) 
+
+
+female_fitness_plot
+```
+
+Test correlation in reproductive success across females with spearman's correlation.
+```{r}
+RS_spearman <- cor.test(female_fitness$TLF_R, female_fitness$TLF_M, method = "spearman") 
+
+RS_spearman
+```
+
+Generate a scatter plot for MFC scores across females. Figure S2A.
+```{r}
+female_MFC_plot <- ggplot(female_fitness, aes(x = rank_score_R, y = rank_score_M)) + 
+  geom_point(color = "black", alpha = 0.2, size = 3) + 
+  sm_statCorr(corr_method = "spearman", linetype = "dashed", color = "black", show_text = FALSE, size=2) +
+  ylab("  \u2640 x Informed \u2642\n MFC Score") + 
+  xlab("\u2640 x Random \u2642\n MFC Score") +
+  scale_y_continuous(limits = c(47, 68), breaks = c(seq(47, 68, by = 3)), expand = expansion(mult = c(0.02, 0))) +
+  scale_x_continuous(limits = c(47, 68), breaks = c(seq(47, 68, by = 3)), expand = expansion(mult = c(0.02, 0.02))) +
+  theme_classic() +
+  theme(text = element_text(family = "sans"),
+    axis.ticks = element_line(linewidth = 1.5, color = "black"),
+    axis.ticks.length = unit(0.25, "cm"),
+    axis.text = element_text(color = "black", size = 14.0),
+    axis.title.y = element_text(color = "black", size = 20, margin = margin(t = 0, r = 10, b = 0, l = 0)),
+    axis.title.x = element_text(color = "black", size = 20, margin = margin(t = 10, r = 0, b = 0, l = 0)),
+    axis.line = element_line(linewidth = 1.5, color = "black")) 
+
+
+female_MFC_plot
+```
+
+Test correlation in MFC scores across females with spearman's correlation.
+```{r}
+MFC_spearman <- cor.test(female_fitness$rank_score_R, female_fitness$rank_score_M, method = "spearman") 
+
+MFC_spearman
+```
+
+Test association among reproductive success, cross type, cross year, and MFC score with a zero-inflated generalized linear mixed effects model (GLMM).Table S5.
+```{r}
+mixed.nb.3 <- glmmTMB(TLF ~ rank_score + cross_type * `Cross Year` + (1|Female_ID), 
+                         data = MFC_scores, 
+                         family = 'nbinom1', 
+                         ziformula = ~1)
+
+summary(mixed.nb.3)
+```
+
+Confirm model assumptions.
+```{r}
+simulationOutput.GLMM.nbinom1 <- simulateResiduals(fittedModel = mixed.nb.3, plot = F) 
+
+plot(simulationOutput.GLMM.nbinom1)
+```
+
+Format data to plot GLMM slopes and 95% confidence intervals.
+```{r}
+data.asfactors <- MFC_scores %>%
+  dplyr::rename("Cross.Year" = "Cross Year") 
+
+data.asfactors$Cross.Year <- factor(data.asfactors$Cross.Year, levels = c("2019", "2020", "2021"))
+data.asfactors$cross_type <- factor(data.asfactors$cross_type, levels = c("M", "R"))
+
+glmm.asfactors<-glmmTMB(TLF ~ rank_score + cross_type * Cross.Year + (1|Female_ID), 
+                         data = data.asfactors, 
+                         family = 'nbinom1',
+                         ziformula = ~1) 
+
+
+mydf <- predict_response(glmm.asfactors, terms = c("rank_score[47:66]", "cross_type", "Cross.Year"), bias_correction = TRUE) 
+
+mydf.df <- as.data.frame(mydf)
+mydf.df.M <- subset(mydf.df, mydf.df$group == "M")
+mydf.df.R <- subset(mydf.df, mydf.df$group == "R")
+
+
+raw <- attr(mydf, "rawdata")
+```
+
+Generate scatter plot for the association between reproductive success and MFC score with GLMM parameters. Figure 3. 
+```{r}
+predicted_scatter <- ggplot(mydf, aes(x = x, y = predicted)) +
+  ylab("Assigned Offspring") + 
+  xlab("MFC Compatibility Score") +
+  scale_y_continuous(limits = c(0, 90), breaks = c(seq(0, 80, by = 20)), expand = expansion(mult = c(0.025, 0))) +
+  scale_x_continuous(limits = c(46.5, 67), breaks = c(seq(47, 67, by = 4)), expand = expansion(mult = c(0.0, 0.025))) + 
+  geom_point(raw, mapping = aes(x = x, y = response, fill = group), colour = "black", pch = 21, alpha = 1, size = 3.2) +
+  scale_fill_manual("", labels = c("\u2640 x Informed \u2642", "\u2640 x Random \u2642"), values = c('snow', 'darkgrey')) +
+  scale_color_manual("", labels = c("\u2640 x Informed \u2642", "\u2640 x Random \u2642"), values = c('black', 'darkgrey')) +
+  geom_line(aes(color = group), linewidth = 2) + 
+  theme_classic() +
+   theme(text = element_text(family = "sans"),
+    legend.key.size = unit(2, "line"),
+    legend.text = element_text(size = 18),
+    axis.ticks = element_line(linewidth = 1.5, color = "black"),
+    axis.ticks.length = unit(0.25, "cm"),
+    axis.text = element_text(color = "black", size = 14.0),
+    axis.title.y = element_text(color = "black", size = 20, margin = margin(t = 0, r = 10, b = 0, l = 0)),
+    axis.title.x = element_text(color = "black", size = 20, margin = margin(t = 10, r = 0, b = 0, l = 0)),
+    axis.line = element_line(linewidth = 1.5, color = "black")) 
+  
+predicted_scatter + facet_wrap(vars(facet)) +
+  geom_ribbon(data = mydf.df.M, aes(x=x, ymin = conf.low, ymax = conf.high), alpha = 0.2) +
+  geom_ribbon(data = mydf.df.R, aes(x=x, ymin = conf.low, ymax = conf.high), alpha = 0.2) +
+  theme(panel.spacing.x = unit(0.75, "cm"),
+        strip.text = element_text(colour = "black", size = 16.0)) +
+  guides(color = guide_legend(override.aes = list(size = 4)))
+```
+
