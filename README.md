@@ -1,5 +1,5 @@
 # Open Data Resource: Evaluating genomic selection, genetic compatbility, and reproductive success in hatchery-origin coho salmon (Oncorhynchus kisutch). 
-## This repository contains the data files and R scripts used in analyses for the submitted manuscript titled above. 
+## This repository contains the data files and R scripts used in analyses for the manuscript titled above published in Frontiers in Ecology and Evolution. 
 ## Objective: Evaluate the reproductive success of genetically informed and random crosses of hatchery-origin coho salmon using genetic parentage analysis, generalized linear mixed models (GLMMs), and genotyping-in-thousands by sequencing (GT-seq).
 ## Coho_salmon_compatbility_analysis_script.HTML: Written summary of the analysis, R code, and pre-rendered figures. 
 ## Coho salmon_compatbility_R_project: R project that can be downloaded for running or manipulating code. 
